@@ -38,31 +38,37 @@ torch.manual_seed(args.seed)
 if torch.cuda.is_available():
     if not args.cuda:
         print("WARNING: You have a CUDA device, so you should probably run with --cuda")
-
-device = torch.device("cuda" if args.cuda else "cpu")
+    else:
+        torch.cuda.manual_seed(args.seed)
 
 if args.temperature < 1e-3:
     parser.error("--temperature has to be greater or equal 1e-3")
 
 with open(args.checkpoint, 'rb') as f:
-    model = torch.load(f).to(device)
+    model = torch.load(f)
 model.eval()
+
+if args.cuda:
+    model.cuda()
+else:
+    model.cpu()
 
 corpus = data.Corpus(args.data)
 ntokens = len(corpus.dictionary)
 hidden = model.init_hidden(1)
-input = torch.randint(ntokens, (1, 1), dtype=torch.long).to(device)
+input = Variable(torch.rand(1, 1).mul(ntokens).long(), volatile=True)
+if args.cuda:
+    input.data = input.data.cuda()
 
 with open(args.outf, 'w') as outf:
-    with torch.no_grad():  # no tracking history
-        for i in range(args.words):
-            output, hidden = model(input, hidden)
-            word_weights = output.squeeze().div(args.temperature).exp().cpu()
-            word_idx = torch.multinomial(word_weights, 1)[0]
-            input.fill_(word_idx)
-            word = corpus.dictionary.idx2word[word_idx]
+    for i in range(args.words):
+        output, hidden = model(input, hidden)
+        word_weights = output.squeeze().data.div(args.temperature).exp().cpu()
+        word_idx = torch.multinomial(word_weights, 1)[0]
+        input.data.fill_(word_idx)
+        word = corpus.dictionary.idx2word[word_idx]
 
-            outf.write(word + ('\n' if i % 20 == 19 else ' '))
+        outf.write(word + ('\n' if i % 20 == 19 else ' '))
 
-            if i % args.log_interval == 0:
-                print('| Generated {}/{} words'.format(i, args.words))
+        if i % args.log_interval == 0:
+            print('| Generated {}/{} words'.format(i, args.words))

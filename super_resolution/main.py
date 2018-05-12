@@ -5,6 +5,7 @@ from math import log10
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch.autograd import Variable
 from torch.utils.data import DataLoader
 from model import Net
 from data import get_training_set, get_test_set
@@ -23,12 +24,13 @@ opt = parser.parse_args()
 
 print(opt)
 
-if opt.cuda and not torch.cuda.is_available():
+cuda = opt.cuda
+if cuda and not torch.cuda.is_available():
     raise Exception("No GPU found, please run without --cuda")
 
 torch.manual_seed(opt.seed)
-
-device = torch.device("cuda" if opt.cuda else "cpu")
+if cuda:
+    torch.cuda.manual_seed(opt.seed)
 
 print('===> Loading datasets')
 train_set = get_training_set(opt.upscale_factor)
@@ -37,8 +39,12 @@ training_data_loader = DataLoader(dataset=train_set, num_workers=opt.threads, ba
 testing_data_loader = DataLoader(dataset=test_set, num_workers=opt.threads, batch_size=opt.testBatchSize, shuffle=False)
 
 print('===> Building model')
-model = Net(upscale_factor=opt.upscale_factor).to(device)
+model = Net(upscale_factor=opt.upscale_factor)
 criterion = nn.MSELoss()
+
+if cuda:
+    model = model.cuda()
+    criterion = criterion.cuda()
 
 optimizer = optim.Adam(model.parameters(), lr=opt.lr)
 
@@ -46,29 +52,34 @@ optimizer = optim.Adam(model.parameters(), lr=opt.lr)
 def train(epoch):
     epoch_loss = 0
     for iteration, batch in enumerate(training_data_loader, 1):
-        input, target = batch[0].to(device), batch[1].to(device)
+        input, target = Variable(batch[0]), Variable(batch[1])
+        if cuda:
+            input = input.cuda()
+            target = target.cuda()
 
         optimizer.zero_grad()
         loss = criterion(model(input), target)
-        epoch_loss += loss.item()
+        epoch_loss += loss.data[0]
         loss.backward()
         optimizer.step()
 
-        print("===> Epoch[{}]({}/{}): Loss: {:.4f}".format(epoch, iteration, len(training_data_loader), loss.item()))
+        print("===> Epoch[{}]({}/{}): Loss: {:.4f}".format(epoch, iteration, len(training_data_loader), loss.data[0]))
 
     print("===> Epoch {} Complete: Avg. Loss: {:.4f}".format(epoch, epoch_loss / len(training_data_loader)))
 
 
 def test():
     avg_psnr = 0
-    with torch.no_grad():
-        for batch in testing_data_loader:
-            input, target = batch[0].to(device), batch[1].to(device)
+    for batch in testing_data_loader:
+        input, target = Variable(batch[0]), Variable(batch[1])
+        if cuda:
+            input = input.cuda()
+            target = target.cuda()
 
-            prediction = model(input)
-            mse = criterion(prediction, target)
-            psnr = 10 * log10(1 / mse.item())
-            avg_psnr += psnr
+        prediction = model(input)
+        mse = criterion(prediction, target)
+        psnr = 10 * log10(1 / mse.data[0])
+        avg_psnr += psnr
     print("===> Avg. PSNR: {:.4f} dB".format(avg_psnr / len(testing_data_loader)))
 
 

@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+from torch.autograd import Variable
 from torch.distributions import Categorical
 
 
@@ -44,16 +45,15 @@ class Policy(nn.Module):
 
 policy = Policy()
 optimizer = optim.Adam(policy.parameters(), lr=1e-2)
-eps = np.finfo(np.float32).eps.item()
 
 
 def select_action(state):
     state = torch.from_numpy(state).float().unsqueeze(0)
-    probs = policy(state)
+    probs = policy(Variable(state))
     m = Categorical(probs)
     action = m.sample()
     policy.saved_log_probs.append(m.log_prob(action))
-    return action.item()
+    return action.data[0]
 
 
 def finish_episode():
@@ -63,8 +63,8 @@ def finish_episode():
     for r in policy.rewards[::-1]:
         R = r + args.gamma * R
         rewards.insert(0, R)
-    rewards = torch.tensor(rewards)
-    rewards = (rewards - rewards.mean()) / (rewards.std() + eps)
+    rewards = torch.Tensor(rewards)
+    rewards = (rewards - rewards.mean()) / (rewards.std() + np.finfo(np.float32).eps)
     for log_prob, reward in zip(policy.saved_log_probs, rewards):
         policy_loss.append(-log_prob * reward)
     optimizer.zero_grad()

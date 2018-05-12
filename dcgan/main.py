@@ -11,6 +11,7 @@ import torch.utils.data
 import torchvision.datasets as dset
 import torchvision.transforms as transforms
 import torchvision.utils as vutils
+from torch.autograd import Variable
 
 
 parser = argparse.ArgumentParser()
@@ -45,6 +46,8 @@ if opt.manualSeed is None:
 print("Random Seed: ", opt.manualSeed)
 random.seed(opt.manualSeed)
 torch.manual_seed(opt.manualSeed)
+if opt.cuda:
+    torch.cuda.manual_seed_all(opt.manualSeed)
 
 cudnn.benchmark = True
 
@@ -82,7 +85,6 @@ assert dataset
 dataloader = torch.utils.data.DataLoader(dataset, batch_size=opt.batchSize,
                                          shuffle=True, num_workers=int(opt.workers))
 
-device = torch.device("cuda:0" if opt.cuda else "cpu")
 ngpu = int(opt.ngpu)
 nz = int(opt.nz)
 ngf = int(opt.ngf)
@@ -100,9 +102,9 @@ def weights_init(m):
         m.bias.data.fill_(0)
 
 
-class Generator(nn.Module):
+class _netG(nn.Module):
     def __init__(self, ngpu):
-        super(Generator, self).__init__()
+        super(_netG, self).__init__()
         self.ngpu = ngpu
         self.main = nn.Sequential(
             # input is Z, going into a convolution
@@ -128,23 +130,23 @@ class Generator(nn.Module):
         )
 
     def forward(self, input):
-        if input.is_cuda and self.ngpu > 1:
+        if isinstance(input.data, torch.cuda.FloatTensor) and self.ngpu > 1:
             output = nn.parallel.data_parallel(self.main, input, range(self.ngpu))
         else:
             output = self.main(input)
         return output
 
 
-netG = Generator(ngpu).to(device)
+netG = _netG(ngpu)
 netG.apply(weights_init)
 if opt.netG != '':
     netG.load_state_dict(torch.load(opt.netG))
 print(netG)
 
 
-class Discriminator(nn.Module):
+class _netD(nn.Module):
     def __init__(self, ngpu):
-        super(Discriminator, self).__init__()
+        super(_netD, self).__init__()
         self.ngpu = ngpu
         self.main = nn.Sequential(
             # input is (nc) x 64 x 64
@@ -168,7 +170,7 @@ class Discriminator(nn.Module):
         )
 
     def forward(self, input):
-        if input.is_cuda and self.ngpu > 1:
+        if isinstance(input.data, torch.cuda.FloatTensor) and self.ngpu > 1:
             output = nn.parallel.data_parallel(self.main, input, range(self.ngpu))
         else:
             output = self.main(input)
@@ -176,7 +178,7 @@ class Discriminator(nn.Module):
         return output.view(-1, 1).squeeze(1)
 
 
-netD = Discriminator(ngpu).to(device)
+netD = _netD(ngpu)
 netD.apply(weights_init)
 if opt.netD != '':
     netD.load_state_dict(torch.load(opt.netD))
@@ -184,9 +186,21 @@ print(netD)
 
 criterion = nn.BCELoss()
 
-fixed_noise = torch.randn(opt.batchSize, nz, 1, 1, device=device)
+input = torch.FloatTensor(opt.batchSize, 3, opt.imageSize, opt.imageSize)
+noise = torch.FloatTensor(opt.batchSize, nz, 1, 1)
+fixed_noise = torch.FloatTensor(opt.batchSize, nz, 1, 1).normal_(0, 1)
+label = torch.FloatTensor(opt.batchSize)
 real_label = 1
 fake_label = 0
+
+if opt.cuda:
+    netD.cuda()
+    netG.cuda()
+    criterion.cuda()
+    input, label = input.cuda(), label.cuda()
+    noise, fixed_noise = noise.cuda(), fixed_noise.cuda()
+
+fixed_noise = Variable(fixed_noise)
 
 # setup optimizer
 optimizerD = optim.Adam(netD.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
@@ -199,23 +213,29 @@ for epoch in range(opt.niter):
         ###########################
         # train with real
         netD.zero_grad()
-        real_cpu = data[0].to(device)
+        real_cpu, _ = data
         batch_size = real_cpu.size(0)
-        label = torch.full((batch_size,), real_label, device=device)
+        if opt.cuda:
+            real_cpu = real_cpu.cuda()
+        input.resize_as_(real_cpu).copy_(real_cpu)
+        label.resize_(batch_size).fill_(real_label)
+        inputv = Variable(input)
+        labelv = Variable(label)
 
-        output = netD(real_cpu)
-        errD_real = criterion(output, label)
+        output = netD(inputv)
+        errD_real = criterion(output, labelv)
         errD_real.backward()
-        D_x = output.mean().item()
+        D_x = output.data.mean()
 
         # train with fake
-        noise = torch.randn(batch_size, nz, 1, 1, device=device)
-        fake = netG(noise)
-        label.fill_(fake_label)
+        noise.resize_(batch_size, nz, 1, 1).normal_(0, 1)
+        noisev = Variable(noise)
+        fake = netG(noisev)
+        labelv = Variable(label.fill_(fake_label))
         output = netD(fake.detach())
-        errD_fake = criterion(output, label)
+        errD_fake = criterion(output, labelv)
         errD_fake.backward()
-        D_G_z1 = output.mean().item()
+        D_G_z1 = output.data.mean()
         errD = errD_real + errD_fake
         optimizerD.step()
 
@@ -223,22 +243,22 @@ for epoch in range(opt.niter):
         # (2) Update G network: maximize log(D(G(z)))
         ###########################
         netG.zero_grad()
-        label.fill_(real_label)  # fake labels are real for generator cost
+        labelv = Variable(label.fill_(real_label))  # fake labels are real for generator cost
         output = netD(fake)
-        errG = criterion(output, label)
+        errG = criterion(output, labelv)
         errG.backward()
-        D_G_z2 = output.mean().item()
+        D_G_z2 = output.data.mean()
         optimizerG.step()
 
         print('[%d/%d][%d/%d] Loss_D: %.4f Loss_G: %.4f D(x): %.4f D(G(z)): %.4f / %.4f'
               % (epoch, opt.niter, i, len(dataloader),
-                 errD.item(), errG.item(), D_x, D_G_z1, D_G_z2))
+                 errD.data[0], errG.data[0], D_x, D_G_z1, D_G_z2))
         if i % 100 == 0:
             vutils.save_image(real_cpu,
                     '%s/real_samples.png' % opt.outf,
                     normalize=True)
             fake = netG(fixed_noise)
-            vutils.save_image(fake.detach(),
+            vutils.save_image(fake.data,
                     '%s/fake_samples_epoch_%03d.png' % (opt.outf, epoch),
                     normalize=True)
 

@@ -5,6 +5,7 @@ from itertools import count
 import torch
 import torch.autograd
 import torch.nn.functional as F
+from torch.autograd import Variable
 
 POLY_DEGREE = 4
 W_target = torch.randn(POLY_DEGREE, 1) * 5
@@ -19,7 +20,7 @@ def make_features(x):
 
 def f(x):
     """Approximated function."""
-    return x.mm(W_target) + b_target.item()
+    return x.mm(W_target) + b_target[0]
 
 
 def poly_desc(W, b):
@@ -36,7 +37,7 @@ def get_batch(batch_size=32):
     random = torch.randn(batch_size)
     x = make_features(random)
     y = f(x)
-    return x, y
+    return Variable(x), Variable(y)
 
 
 # Define model
@@ -51,7 +52,7 @@ for batch_idx in count(1):
 
     # Forward pass
     output = F.smooth_l1_loss(fc(batch_x), batch_y)
-    loss = output.item()
+    loss = output.data[0]
 
     # Backward pass
     output.backward()
@@ -65,5 +66,5 @@ for batch_idx in count(1):
         break
 
 print('Loss: {:.6f} after {} batches'.format(loss, batch_idx))
-print('==> Learned function:\t' + poly_desc(fc.weight.view(-1), fc.bias))
+print('==> Learned function:\t' + poly_desc(fc.weight.data.view(-1), fc.bias.data))
 print('==> Actual function:\t' + poly_desc(W_target.view(-1), b_target))
